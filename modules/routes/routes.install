@@ -1,0 +1,112 @@
+<?php
+
+/**
+ * Implements hook_schema().
+ */
+function routes_schema() {
+	$schema = array();
+
+	$schema['routes'] = array(
+		'description' => 'The base table for routes entities.',
+		'fields' => array(
+			'rid' => array(
+				'description' => 'Primary Key',
+				'type' => 'serial',
+				'unsigned' => TRUE,
+				'not null' => TRUE,
+			),
+			'type' => array(
+				'description' => 'Routes type',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+				'default' => '',
+			),
+			'name' => array(
+				'description' => 'human-readable identifier.',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+				'default' => '',
+			),
+			'pid1' => array(
+				'description' => 'The GeoPoint from',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+				'default' => '',
+			),
+			'pid2' => array(
+				'description' => 'The GeoPoint to',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+				'default' => '',
+			),
+			'distance' => array(
+				'description' => 'Distance',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+				'default' => '',
+			),
+			'duration' => array(
+				'description' => 'Duration',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+				'default' => '',
+			),
+		),
+		'primary key' => array('rid'),
+		'indexes' => array(
+			'type' => array('type'),
+		),
+	);
+
+	$schema['routes_type'] = array(
+		'description' => 'Stores information about defined routes types.',
+		'fields' => array(
+			'id' => array(
+				'type' => 'serial',
+				'not null' => TRUE,
+				'description' => 'Primary Key: Unique routes type identifier.',
+			),
+			'type' => array(
+				'description' => 'The machine-readable name of this routes type.',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+			),
+			'label' => array(
+				'description' => 'The human-readable name of this routes type.',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+				'default' => '',
+			),
+		) + entity_exportable_schema_fields(),
+		'primary key' => array('id'),
+		'unique keys' => array(
+			'type' => array('type'),
+		),
+	);
+
+	return $schema;
+}
+
+
+function routes_install(){
+	$type_created = FALSE;
+	$type_default = 'default';
+	foreach (routes_get_types() as $type) {
+		if ($type_default == $type) $type_created = TRUE;
+	}
+
+	if (!$type_created) {
+		$routes_type = new RoutesType();
+		$routes_type->type = $type_default;
+		$routes_type->label = 'Default';
+		$routes_type->save();
+	}
+}

@@ -1,0 +1,19 @@
+name = GeoPoint
+description = Enity Geo object provide geo information
+core = 7.x
+package = Daway
+
+dependencies[] = entity
+dependencies[] = views
+
+files[] = geopoint.admin.inc
+files[] = geopoint.tokens.inc
+files[] = geopoint.pathauto.inc
+files[] = geopoint_type.admin.inc
+files[] = views/geopoint.views.inc
+files[] = views/geopoint_handler_link_field.inc
+files[] = views/geopoint_handler_delete_link_field.inc
+files[] = views/geopoint_handler_edit_link_field.inc
+files[] = views/geopoint_handler_geopoint_operations_field.inc
+files[] = views/geopoint_handler_index_field.inc
+files[] = views/geopoint_handler_radius_filter.inc

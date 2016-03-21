@@ -1,0 +1,96 @@
+<?php
+
+/**
+ * @file
+ * Sets up the base table for our entity and a table to store information about
+ * the entity types.
+ */
+
+
+/**
+ * Implements hook_schema().
+ */
+function geopoint_schema() {
+	$schema = array();
+
+	$schema['geopoint'] = array(
+		'description' => 'The base table for geopoint entities.',
+		'fields' => array(
+			'pid' => array(
+				'description' => 'Primary Key: Identifier for a geopoint.',
+				'type' => 'serial',
+				'unsigned' => TRUE,
+				'not null' => TRUE,
+			),
+			'type' => array(
+				'description' => 'The {geopoint_type}.type of this model.',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+				'default' => '',
+			),
+			'name' => array(
+				'description' => 'The name of the geopoint - a human-readable identifier.',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+				'default' => '',
+			),
+			'short' => array(
+				'description' => 'The name of the geopoint - a human-readable identifier.',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+				'default' => '',
+			),
+			'latitude' => array(
+				'description' => 'The latitude geopoint',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+				'default' => '',
+			),
+			'longitude' => array(
+				'description' => 'The longitude geopoint',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+				'default' => '',
+			),
+		),
+		'primary key' => array('pid'),
+		'indexes' => array(
+			'type' => array('type'),
+		),
+	);
+
+	$schema['geopoint_type'] = array(
+		'description' => 'Stores information about defined geopoint types.',
+		'fields' => array(
+			'id' => array(
+				'type' => 'serial',
+				'not null' => TRUE,
+				'description' => 'Primary Key: Unique geopoint type identifier.',
+			),
+			'type' => array(
+				'description' => 'The machine-readable name of this geopoint type.',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+			),
+			'label' => array(
+				'description' => 'The human-readable name of this geopoint type.',
+				'type' => 'varchar',
+				'length' => 255,
+				'not null' => TRUE,
+				'default' => '',
+			),
+		) + entity_exportable_schema_fields(),
+		'primary key' => array('id'),
+		'unique keys' => array(
+			'type' => array('type'),
+		),
+	);
+
+	return $schema;
+}

@@ -1,0 +1,985 @@
+<?php
+
+/**
+ * Implements hook_cron().
+ */
+function geopoint_cron() {
+  $queue = DrupalQueue::get('GeoPointTranslateQueue');
+  $items = geopoint_queue_get_translate();
+  foreach ($items as $item) {
+    $queue->createItem($item);
+  }
+}
+
+/**
+ * Implements hook_cron_queue_info().
+ */
+function geopoint_cron_queue_info() {
+  $queues = array();
+  $queues['GeoPointTranslateQueue'] = array(
+    'worker callback' => 'geopoint_queue_translate',
+    'time' => 60,
+  );
+  return $queues;
+}
+
+function geopoint_queue_translate($item) {
+  $geocode = geopoint_google($item['name'], $item['language']);
+  if ($geocode) {
+    $fields = array(
+      'name' => $geocode->formatted_address,
+      'short' => $geocode->address_components[0]->long_name,
+      'pid' => $item['pid'],
+      'language' => $item['language'],
+    );
+
+    geopoint_queue_set_translate($fields);
+  }
+}
+
+
+function geopoint_queue_set_translate($fields) {
+  db_insert('geopoint_languages')->fields($fields)->execute();
+}
+
+function geopoint_t($pid, $type = 'short', $lng = 'en') {
+  global $language;
+  if ($lng == 'en') {
+    $lng = $language->language;
+  }
+
+  $query = db_select('geopoint_languages', 'l')
+    ->condition('l.language', $lng)
+    ->condition('l.pid', $pid);
+  if ($type == 'full') {
+    $query->fields('l', array('name'));
+  }
+  else {
+    $query->fields('l', array('short'));
+  }
+
+  $result = $query->execute()->fetchField();
+
+  return ($result) ? $result : FALSE;
+}
+
+
+function geopoint_name($pid, $type) {
+  $geopoint = geopoint_load($pid);
+  $prefix = '';
+  if (!isset($geopoint->type)) {
+    return FALSE;
+  }
+  if ($geopoint->type == 'street_number') {
+    $prefix = ', ' . $geopoint->short;
+    $geopoint = geopoint_load($geopoint->shema['route']);
+  }
+  return geopoint_t($geopoint->pid, $type) ? geopoint_t($geopoint->pid, $type) . $prefix : $geopoint->short . $prefix;
+}
+
+function geopoint_queue_get_translate() {
+  $query = db_select('geopoint', 'g');
+  $query->fields('g', array('pid', 'type'));
+  $query->join('geopoint_index', 'gi', 'gi.pid = g.pid AND gi.type = g.type');
+  $query->addField('gi', 'query', 'name');
+
+  $geopoints = $query->execute();
+  $translated_arr = array();
+
+  // get langusge list
+  $languages = language_list('enabled');
+  $languages = array_keys($languages[1]);
+
+  $count = 0;
+  foreach ($geopoints as $geopoint) {
+    foreach ($languages as $language) {
+
+      if ($language == 'en') {
+        continue;
+      }
+
+      if (!geopoint_t($geopoint->pid, 'full', $language)) {
+        $translated_arr[] = array(
+          'language' => $language,
+          'pid' => $geopoint->pid,
+          'name' => $geopoint->name,
+        );
+      }
+    }
+    if (count($translated_arr) == 40) {
+      break;
+    }
+    $count++;
+  }
+
+  return $translated_arr;
+}
+
+function geopoint_preprocess(&$variables, $hook) {
+  if (isset($variables['elements']['#entity_type'])) {
+    if ($variables['elements']['#entity_type'] == 'geopoint') {
+      $hook = 'preprocess_' . $variables['elements']['#entity_type'];
+      $modules = module_implements($hook);
+      foreach ($modules as $module) {
+        $function = "{$module}_{$hook}";
+        $function($variables);
+      }
+    }
+  }
+}
+
+
+/**
+ * Implement hook_entity_info().
+ */
+function geopoint_entity_info() {
+  $return['geopoint'] = array(
+    'label' => t('GeoPoint'),
+    'entity class' => 'GeoPoint',
+    'controller class' => 'GeoPointController',
+    'base table' => 'geopoint',
+    'fieldable' => TRUE,
+    'entity keys' => array(
+      'id' => 'pid',
+      'bundle' => 'type',
+    ),
+    'bundles' => array(),
+    'bundle keys' => array(
+      'bundle' => 'type',
+    ),
+    'label callback' => 'entity_class_label',
+    'uri callback' => 'entity_class_uri',
+    'creation callback' => 'geopoint_create',
+    'access callback' => 'geopoint_access',
+    'module' => 'geopoint',
+    'admin ui' => array(
+      'path' => 'admin/content/geopoints',
+      'file' => 'geopoint.admin.inc',
+      'controller class' => 'GeoPointUIController',
+      'menu wildcard' => '%geopoint',
+    ),
+  );
+
+  $return['geopoint_type'] = array(
+    'label' => t('GeoPoint Type'),
+    'entity class' => 'GeoPointType',
+    'controller class' => 'GeoPointTypeController',
+    'base table' => 'geopoint_type',
+    'fieldable' => FALSE,
+    'bundle of' => 'geopoint',
+    'exportable' => TRUE,
+    'entity keys' => array(
+      'id' => 'id',
+      'name' => 'type',
+      'label' => 'label',
+    ),
+    'access callback' => 'geopoint_type_access',
+    'module' => 'geopoint',
+    'admin ui' => array(
+      'path' => 'admin/structure/geopoint',
+      'file' => 'geopoint_type.admin.inc',
+      'controller class' => 'GeoPointTypeUIController',
+    ),
+  );
+
+  return $return;
+}
+
+
+/**
+ * Implements hook_entity_info_alter().
+ */
+function geopoint_entity_info_alter(&$entity_info) {
+  foreach (geopoint_get_types() as $type => $info) {
+    $entity_info['geopoint']['bundles'][$type] = array(
+      'label' => $info->label,
+      'admin' => array(
+        'path' => 'admin/structure/geopoint/manage/%geopoint_type',
+        'real path' => 'admin/structure/geopoint/manage/' . $type,
+        'bundle argument' => 4,
+        'access arguments' => array('administer geopoint types'),
+      ),
+    );
+  }
+  if (isset($entity_info['geopoint'])) {
+    $entity_info['geopoint']['token type'] = 'geopoint';
+  }
+}
+
+
+/**
+ * Implements hook_permission().
+ */
+function geopoint_permission() {
+  $permissions = array(
+    'administer geopoint types' => array(
+      'title' => t('Administer geopoint types'),
+      'description' => t('Create and delete fields for geopoint types, and set their permissions.'),
+    ),
+    'administer geopoints' => array(
+      'title' => t('Administer geopoints'),
+      'description' => t('Edit and delete all geopoints'),
+    ),
+  );
+
+  foreach (geopoint_get_types() as $type) {
+    $type_name = check_plain($type->type);
+    $permissions += array(
+      "edit any $type_name geopoint" => array(
+        'title' => t('%type_name: Edit any geopoint', array('%type_name' => $type->label)),
+      ),
+      "view any $type_name geopoint" => array(
+        'title' => t('%type_name: View any geopoint', array('%type_name' => $type->label)),
+      ),
+    );
+  }
+  return $permissions;
+}
+
+
+/**
+ * Determines whether the given user has access to a geopoint.
+ */
+function geopoint_access($op, $geopoint = NULL, $account = NULL) {
+  if (user_access('administer geopoints', $account)) {
+    return TRUE;
+  }
+  if (isset($geopoint) && $type_name = $geopoint->type) {
+    $op = ($op == 'view') ? 'view' : 'edit';
+    if (user_access("$op any $type_name geopoint", $account)) {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+
+/**
+ * Access callback for the entity API.
+ */
+function geopoint_type_access($op, $type = NULL, $account = NULL) {
+  return user_access('administer geopoint types', $account);
+}
+
+
+/**
+ * Gets an array of all geopoint types, keyed by the type name.
+ */
+function geopoint_get_types($type_name = NULL) {
+  $types = entity_load_multiple_by_name('geopoint_type', isset($type_name) ? array($type_name) : FALSE);
+  return isset($type_name) ? reset($types) : $types;
+}
+
+
+/**
+ * Menu argument loader; Load a geopoint type by string.
+ */
+function geopoint_type_load($type) {
+  return geopoint_get_types($type);
+}
+
+
+/**
+ * Geopoint load by PID
+ */
+function geopoint_load($pid, $reset = FALSE) {
+  $geopoints = geopoint_load_multiple(array($pid), array(), $reset);
+  return reset($geopoints);
+}
+
+/**
+ * Geopoint load by Type
+ */
+function geopoint_load_by_type($type) {
+  $query = db_select('geopoint', 'g');
+  $query->fields('g', array('pid'));
+  $query->condition('g.type', $type);
+  $results = $query->execute()->fetchCol();
+  return geopoint_load_multiple($results);
+}
+
+/**
+ * Load Geopoint by Name
+ */
+function geopoint_load_by_name($name) {
+  $pid = db_select('geopoint', 'p')
+    ->condition('name', $name)
+    ->fields('p', array('pid'))
+    ->execute()
+    ->fetchField();
+
+  return ($pid) ? geopoint_load($pid) : FALSE;
+}
+
+/**
+ * Load Geopoint by latlng
+ */
+function geopoint_load_by_latlng($lat, $lng, $type) {
+  $pid = db_select('geopoint', 'p')
+    ->condition('latitude', $lat)
+    ->condition('longitude', $lng)
+    ->condition('type', $type)
+    ->fields('p', array('pid'))
+    ->execute()
+    ->fetchField();
+
+  return (is_numeric($pid)) ? geopoint_load($pid) : 0;
+}
+
+/**
+ * Geopoint load multiple
+ */
+function geopoint_load_multiple($pids = array(), $conditions = array(), $reset = FALSE) {
+
+  $weight = array(
+    'street_number',
+    'street_address',
+    'route',
+    'sublocality',
+    'locality',
+    'administrative_area_level_3',
+    'administrative_area_level_2',
+    'administrative_area_level_1',
+    'country',
+    'intersection',
+    'political',
+    'colloquial_area',
+    'neighborhood',
+    'premise',
+    'subpremise',
+    'postal_code',
+    'natural_feature',
+    'airport',
+    'park',
+    'point_of_interest',
+    'post_box',
+    'floor',
+    'room',
+  );
+
+
+  $entitys = entity_load('geopoint', $pids, $conditions, $reset);
+
+  foreach ($entitys as $pid => $entity) {
+    $query = db_select('geopoint_index', 'gi')
+      ->condition('gi.pid', $pid, '=')
+      ->fields('gi', array('type', 'pid_original'));
+    $query->innerJoin('geopoint', 'g', 'g.pid = gi.pid_original');
+    $query->addField('g', 'pid', 'gpid');
+    $query->groupBy('gi.type');
+    $results = $query->execute();
+    $shema = array();
+    foreach ($results as $item) {
+      $shema[$item->type] = $item->gpid;
+    }
+    $shema_sort = array();
+    foreach ($weight as $item) {
+      if (isset($shema[$item])) {
+        $shema_sort[$item] = $shema[$item];
+      }
+    }
+
+//		dsm($shema_sort);
+    $entitys[$pid]->shema = array_reverse($shema_sort);
+  }
+
+  return $entitys;
+}
+
+
+/**
+ * Deletes GeoPoint.
+ */
+function geopoint_delete(GeoPoint $geopoint) {
+  $geopoint->delete();
+}
+
+
+/**
+ * Delete multiple GeoPoint.
+ */
+function geopoint_delete_multiple(array $pids) {
+  entity_get_controller('geopoint')->delete($pids);
+}
+
+
+/**
+ * Create GeoPoint
+ */
+function geopoint_create($values = array()) {
+  return entity_get_controller('geopoint')->create($values);
+}
+
+
+/**
+ * Saves GeoPoint
+ */
+function geopoint_save(GeoPoint $geopoint) {
+  return $geopoint->save();
+}
+
+
+/**
+ * Saves a model type to the db.
+ */
+function geopoint_type_save(GeoPointType $type) {
+  $type->save();
+}
+
+
+/**
+ * Deletes a GeoPoint type.
+ */
+function geopoint_type_delete(GeoPointType $type) {
+  $type->delete();
+}
+
+
+/**
+ * URI callback for GeoPoint
+ */
+function geopoint_uri(GeoPoint $geopoint) {
+  return array(
+    'path' => 'geopoint/' . $geopoint->pid,
+  );
+}
+
+
+/**
+ * Menu title callback for showing individual entities
+ */
+function geopoint_page_title(GeoPoint $geopoint) {
+
+  $prefix = '';
+  if (arg(2)) {
+    switch (arg(2)) {
+      case 'drivers' :
+        $prefix = t('Car shares').' ';
+        break;
+      case 'passengers' :
+        $prefix = t('Trip passengers').' ';
+        break;
+    }
+    if (arg(3)) {
+      switch (arg(3)) {
+        case 'man' :
+          $prefix = t('Mail trip passenger').' ';
+          break;
+        case 'woman' :
+          $prefix = t('Female trip passanger').' ';
+          break;
+      }
+    }
+  }
+
+  return $prefix.geopoint_name($geopoint->pid, 'short');
+}
+
+
+/**
+ * Geopoint return full name
+ */
+function geopoint_get_full_name($pid) {
+  $entitys = geopoint_load($pid);
+
+  $query = db_select('geopoint_index', 'gi')->condition('gi.pid', $pid, '=')->fields('gi', array('type', 'name'));
+  $query->innerJoin('geopoint', 'g', 'g.type = gi.type AND g.pid = gi.pid_original');
+  $query->addField('g', 'short', 'short');
+  $query->addField('g', 'pid', 'pid');
+  $query->groupBy('gi.type');
+
+  $results = $query->execute();
+  foreach ($results as $item) {
+    $name[$item->type] = geopoint_name($item->pid, 'short');
+  }
+
+  $weight = array(
+    'street_number',
+    'street_address',
+    'route',
+    'sublocality',
+    'locality',
+    'administrative_area_level_3',
+    'administrative_area_level_2',
+    'administrative_area_level_1',
+    'country',
+    'intersection',
+    'political',
+    'colloquial_area',
+    'neighborhood',
+    'premise',
+    'subpremise',
+    'postal_code',
+    'natural_feature',
+    'airport',
+    'park',
+    'point_of_interest',
+    'post_box',
+    'floor',
+    'room',
+  );
+
+  $shema_sort = array();
+  foreach ($weight as $item) {
+    if (isset($name[$item])) {
+      $shema_sort[$item] = $name[$item];
+    }
+  }
+
+  return array_reverse($shema_sort);
+
+
+}
+
+
+/**
+ * Sets up content to show an individual geopoint
+ * @todo - get rid of drupal_set_title();
+ */
+function geopoint_page_view($geopoint, $view_mode = 'full') {
+  $controller = entity_get_controller('geopoint');
+  $content = $controller->view(array($geopoint->pid => $geopoint));
+//	drupal_set_title($geopoint->name);
+  return $content;
+}
+
+
+/**
+ * Implements hook_views_api().
+ */
+function geopoint_views_api() {
+  return array(
+    'api' => 3,
+    'path' => drupal_get_path('module', 'geopoint') . '/views',
+  );
+}
+
+
+/**
+ * Implement hook_theme().
+ */
+function geopoint_theme() {
+  return array(
+    'geopoint_add_list' => array(
+      'variables' => array('content' => array()),
+      'file' => 'geopoint.admin.inc',
+    ),
+    'geopoint' => array(
+      'render element' => 'elements',
+      'template' => 'geopoint',
+    ),
+  );
+}
+
+
+/**
+ * Implements hook_menu_local_tasks_alter().
+ */
+function geopoint_menu_local_tasks_alter(&$data, $router_item, $root_path) {
+  // Add action link 'admin/structure/models/add' on 'admin/structure/models'.
+  if ($root_path == 'admin/content/geopoints') {
+    $item = menu_get_item('admin/content/geopoints/add');
+    if ($item['access']) {
+      $data['actions']['output'][] = array(
+        '#theme' => 'menu_local_action',
+        '#link' => $item,
+      );
+    }
+  }
+}
+
+
+/**
+ * The class used for model entities
+ */
+class GeoPoint extends Entity {
+
+  public function __construct($values = array()) {
+    parent::__construct($values, 'geopoint');
+  }
+
+  protected function defaultLabel() {
+    return $this->name;
+  }
+
+  protected function defaultUri() {
+    return array('path' => 'geopoint/' . $this->pid);
+  }
+
+  public function save() {
+
+    if ($geocode = geopoint_google($this->name)) {
+      $address_components = array_values($geocode->address_components);
+
+      // собираем все значения сортируя по типу
+      $address_components_name = array();
+      foreach ($address_components as $item) {
+        // почемуто бывает так что значения пустые
+        if (isset($item->types[0])) {
+          $address_components_name[$item->types[0]] = str_replace('\'', '', $item->long_name);
+        }
+      }
+
+
+      $country = isset($address_components_name['country']) ? $address_components_name['country'] : '';
+      $locality = isset($address_components_name['locality']) ? $address_components_name['locality'] : '';
+      $administrative_area_level_1 = isset($address_components_name['administrative_area_level_1']) ? $address_components_name['administrative_area_level_1'] : '';
+
+      // теперь формируем якобы нужный нам аддресс
+      $address_components_point = array();
+      foreach ($address_components_name as $type => $item) {
+        switch ($type) {
+          case 'administrative_area_level_1' :
+            $address_components_point[$type] = 'Country ' . $country . ', ' . $item;
+            break;
+          case 'administrative_area_level_2' :
+            $address_components_point[$type] = 'Country ' . $country . ', ' . $administrative_area_level_1 . ', ' . $item;
+            break;
+          case 'country' :
+            $address_components_point[$type] = 'Country ' . $item;
+            break;
+          case 'locality' :
+            $address_components_point[$type] = 'Country ' . $country . ', ' . $administrative_area_level_1 . ', ' . $item;
+            break;
+          case 'postal_code' :
+            $address_components_point[$type] = 'Country ' . $country . ', ' . $item;
+            break;
+          case 'street_number' :
+            $street = (isset($address_components_name['route'])) ? $address_components_name['route'] : '';
+            $address_components_point[$type] = $country . ', ' . $locality . ', ' . $street . ' ' . $item;
+            break;
+          default :
+            $address_components_point[$type] = $country . ', ' . $locality . ', ' . $item;
+        }
+      }
+
+      if (!count($address_components_point)) {
+        return FALSE;
+      }
+
+      // а вот теперь попробуем сделать все запросы и сохранять данные
+      $geopoints = array();
+      foreach ($address_components_point as $type => $name) {
+
+        // проверяем по таблице индексов может эта точка уже создавалась
+        $is_created_index = db_select('geopoint_index', 'gi')
+          ->condition('query', $name)
+          ->condition('type', $type)
+          ->fields('gi', array('pid_original'))
+          ->execute()
+          ->fetchField();
+
+        if ($is_created_index) {
+          $is_created_index = geopoint_load($is_created_index);
+          $geopoints[$is_created_index->type] = array(
+            'name' => $is_created_index->name,
+            'short' => $is_created_index->short,
+            'latitude' => $is_created_index->latitude,
+            'longitude' => $is_created_index->longitude,
+            'query' => $name,
+            'type' => $type
+          );
+//					parent::save();
+
+        }
+        else {
+          if ($geocode = geopoint_google($name)) {
+            $geopoints[$type] = array(
+              'name' => $geocode->formatted_address,
+              'short' => $geocode->address_components[0]->long_name,
+              'latitude' => $geocode->geometry->location->lat,
+              'longitude' => $geocode->geometry->location->lng,
+              'query' => $name,
+              'type' => $type
+            );
+          }
+        }
+      }
+
+      // теперь проверим правельно ли мы все получили
+      // то что то мы не догеокодировали
+      if (count($address_components_point) != count($geopoints)) {
+        $what_blank = array_diff(array_keys($address_components_point), array_keys($geopoints));
+        foreach ($what_blank as $item) {
+          $geopoints[$item] = array(
+            'name' => $address_components_point[$item],
+            'short' => $address_components_name[$item],
+            'latitude' => 0,
+            'longitude' => 0,
+            'query' => $address_components_point[$item],
+            'type' => $item
+          );
+        }
+      }
+      // тут я все сохраняю
+
+      foreach ($geopoints as $type => $geopoint) {
+        $point = geopoint_load_by_latlng($geopoint['latitude'], $geopoint['longitude'], $type);
+        if (!$point) {
+          $point = new stdClass();
+          $point->name = $geopoint['name'];
+          $point->short = $geopoint['short'];
+          $point->latitude = $geopoint['latitude'];
+          $point->longitude = $geopoint['longitude'];
+
+          if (!array_key_exists($type, geopoint_get_types())) {
+            $geopoint_type = new GeoPointType();
+            $geopoint_type->type = $type;
+            $geopoint_type->label = $type;
+            $geopoint_type->save();
+          }
+          $point->type = $type;
+          $entity = entity_save('geopoint', $point);
+//					parent::save();
+          //entity_get_controller('geopoint')->save($point);
+        }
+        $geopoints[$type]['obj'] = $point;
+
+      }
+
+      // теперь формируем компоненты уже непосредственно на запись в индекс
+      $address_components_keys = array_keys($address_components_point);
+      $shema = array();
+      for ($i = 0; $i < count($address_components_keys); $i++) {
+        for ($j = $i; $j < count($address_components); $j++) {
+          $shema[$geopoints[$address_components_keys[$i]]['obj']->pid][] = $geopoints[$address_components_keys[$j]]['obj'];
+        }
+      }
+
+      // и теперь записываем все данные в индекс
+
+      foreach ($shema as $pid => $items) {
+        foreach ($items as $obj) {
+
+          $is_indexed = db_select('geopoint_index', 'gi')
+            ->condition('type', $obj->type)
+            ->condition('pid', $pid)
+            ->condition('query', $geopoints[$obj->type]['query'])
+            ->condition('pid_original', $obj->pid)
+            ->fields('gi', array('pid'))
+            ->execute()
+            ->fetchField();
+
+          if (!$is_indexed) {
+            db_insert('geopoint_index')
+              ->fields(array(
+                'type' => $obj->type,
+                'query' => $geopoints[$obj->type]['query'],
+                'pid' => $pid,
+                'pid_original' => $obj->pid
+              ))
+              ->execute();
+          }
+        }
+      }
+
+    }
+    $first = array_shift(array_values($geopoints));
+
+    $this->pid = $first['obj']->pid;
+    $this->name = $first['obj']->name;
+    $this->short = $first['obj']->short;
+    $this->latitude = $first['obj']->latitude;
+    $this->longitude = $first['obj']->longitude;
+    $this->query = (isset($first['obj']->query)) ? $first['obj']->query : $first['obj']->name;
+    $this->type = $first['obj']->type;
+
+    parent::save();
+    return $first['obj'];
+
+  }
+
+}
+
+
+/**
+ * The class used for model type entities
+ */
+class GeoPointType extends Entity {
+
+  public $type;
+  public $label;
+
+  public function __construct($values = array()) {
+    parent::__construct($values, 'geopoint_type');
+  }
+
+}
+
+
+/**
+ * The Controller for Model entities
+ */
+class GeoPointController extends EntityAPIController {
+  public function __construct($entityType) {
+    parent::__construct($entityType);
+  }
+
+
+  /**
+   * Create a model - we first set up the values that are specific
+   * to our model schema but then also go through the EntityAPIController
+   * function.
+   *
+   * @param $type
+   *   The machine-readable type of the model.
+   *
+   * @return
+   *   A model object with all default fields initialized.
+   */
+  public function create(array $values = array()) {
+    // Add values that are specific to our Model
+    $values += array(
+      'pid' => '',
+      'title' => '',
+      'is_new' => TRUE,
+      'latitude' => '',
+      'longitude' => '',
+      'short' => '',
+    );
+
+    $geopoint = parent::create($values);
+    return $geopoint;
+  }
+
+  /**
+   * Overriding the buldContent function to add entity specific fields
+   */
+  public function buildContent($entity, $view_mode = 'full', $langcode = NULL, $content = array()) {
+    $content = parent::buildContent($entity, $view_mode, $langcode, $content);
+    $content['geopoint'] = $entity;
+
+    return $content;
+  }
+
+}
+
+
+/**
+ * The Controller for Model entities
+ */
+class GeoPointTypeController extends EntityAPIControllerExportable {
+  public function __construct($entityType) {
+    parent::__construct($entityType);
+  }
+
+  /**
+   * Create a model type - we first set up the values that are specific
+   * to our model type schema but then also go through the EntityAPIController
+   * function.
+   *
+   * @param $type
+   *   The machine-readable type of the model.
+   *
+   * @return
+   *   A model type object with all default fields initialized.
+   */
+  public function create(array $values = array()) {
+    // Add values that are specific to our Model
+    $values += array(
+      'id' => '',
+      'is_new' => TRUE,
+    );
+    $geopoint_type = parent::create($values);
+    return $geopoint_type;
+  }
+
+}
+
+
+/**
+ * ---------------------------------------------------------------------------------------------------------------------
+ * Get geo information by Geo name
+ */
+function geopoint_google($arg, $language = 'en') {
+
+//	$count = variable_get('DAWAY_GEOCODER_QUERY_COUNT', 0);
+//	$count++;
+//	variable_set('DAWAY_GEOCODER_QUERY_COUNT', $count);
+//	if ($count >= 2000) {return FALSE;}
+//	$geocode = file_get_contents('http://maps.googleapis.com/maps/api/geocode/json?address=' . urlencode($arg) . '&sensor=false&language=' . $language);
+  $results = daway_geocode_result('geocode', array('arg' => urlencode($arg), 'ln' => $language));
+  if ($results->status == 'OK') {
+    return $results->results[0];
+  }
+  else {
+    return FALSE;
+  }
+}
+
+/**
+ * ---------------------------------------------------------------------------------------------------------------------
+ */
+
+/**
+ * Implements hook_field_info().
+ *
+ * Provides the description of the field.
+ */
+function geopoint_index_get_field() {
+  $field = db_select('geopoint_index', 'g')
+    ->fields('g', array('type'))
+    ->groupBy('type')
+    ->execute();
+
+  $fields = array();
+  foreach ($field as $item) {
+    $fields[] = $item->type;
+  }
+  return $fields;
+}
+
+
+/**
+ * Implements hook_field_info().
+ *
+ * Provides the description of the field.
+ */
+function geopoint_distancematrix($p1, $p2) {
+  //http://maps.googleapis.com/maps/api/distancematrix/json?origins=$p1&destinations=$p2&sensor=false
+  $results = file_get_contents('http://maps.googleapis.com/maps/api/distancematrix/json?origins=' . urlencode($p1) . '&destinations=' . urlencode($p2) . '&sensor=false');
+  $results = json_decode($results);
+  if ($results->status == 'OK') {
+    $data = array(
+      'distance' => $results->rows[0]->elements[0]->distance->value,
+      'duration' => $results->rows[0]->elements[0]->duration->value,
+    );
+
+    return $data;
+  }
+  else {
+    return FALSE;
+  }
+}
+
+
+function geopoint_get_radius($pid) {
+  //http://gws2.maps.yahoo.com/findlocation?pf=1&locale=en_US&q=%D1%83%D0%BA%D1%80%D0%BE%D0%BC%D0%BD%D0%BE%D0%B5%20%D1%83%D0%BA%D1%80%D0%B0%D0%B8%D0%BD%D0%B0
+  $geopoint = geopoint_load($pid);
+  $results = file_get_contents('http://gws2.maps.yahoo.com/findlocation?pf=1&locale=en_US&q=' . $geopoint->name);
+  $results = new SimpleXMLElement($results);
+  if (isset($results->Result)) {
+    if (isset($results->Result->radius)) {
+      return (string) $results->Result->radius;
+    }
+    else {
+      return 1;
+    }
+  }
+  else {
+    return 1;
+  }
+}
+
+function geopoint_save_radius($pid, $radius) {
+  db_insert('geopoint_radius')->fields(array('pid' => $pid, 'radius' => $radius))->execute();
+}
+
+function geopoint_load_radius($pid) {
+  $radius = db_select('geopoint_radius', 'gr')
+    ->fields('gr', array('radius'))
+    ->condition('gr.pid', $pid)
+    ->execute()
+    ->fetchField();
+  return ($radius) ? $radius : 1;
+}

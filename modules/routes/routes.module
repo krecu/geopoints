@@ -1,0 +1,594 @@
+<?php
+
+/**
+ * @file
+ * Module for the routes Entity - a starting point to create your own Entity
+ * and associated administration interface
+ */
+
+
+/**
+ * Implement hook_entity_info().
+ *
+ * We define two entities here - the actual entity that will hold our domain
+ * specific information and an entity that holds information about the different
+ * types of entities. See here: http://drupal.org/node/977380 for a discussion on this
+ * choice.
+ */
+function routes_entity_info() {
+  $return['routes'] = array(
+    'label' => t('Routes'),
+    // The entity class and controller class extend the classes provided by the
+    // Entity API
+    'entity class' => 'Routes',
+    'controller class' => 'RoutesController',
+    'base table' => 'routes',
+    'fieldable' => TRUE,
+    'entity keys' => array(
+      'id' => 'rid',
+      'bundle' => 'type',
+    ),
+    // Bundles are defined by the model types below
+    'bundles' => array(),
+    // Bundle keys tell the FieldAPI how to extract information from the bundle objects
+    'bundle keys' => array(
+      'bundle' => 'type',
+    ),
+    'label callback' => 'entity_class_label',
+    'uri callback' => 'entity_class_uri',
+    'creation callback' => 'routes_create',
+    'access callback' => 'routes_access',
+    'module' => 'routes',
+    // The information below is used by the ModelUIController (which extends the EntityDefaultUIController)
+    'admin ui' => array(
+      'path' => 'admin/content/routes',
+      'file' => 'routes.admin.inc',
+      'controller class' => 'RoutesUIController',
+      'menu wildcard' => '%routes',
+    ),
+  );
+  // The entity that holds information about the entity types
+  $return['routes_type'] = array(
+    'label' => t('Routes Type'),
+    'entity class' => 'RoutesType',
+    'controller class' => 'RoutesTypeController',
+    'base table' => 'routes_type',
+    'fieldable' => FALSE,
+    'bundle of' => 'routes',
+    'exportable' => TRUE,
+    'entity keys' => array(
+      'id' => 'id',
+      'name' => 'type',
+      'label' => 'label',
+    ),
+    'access callback' => 'routes_type_access',
+    'module' => 'routes',
+    // Enable the entity API's admin UI.
+    'admin ui' => array(
+      'path' => 'admin/structure/routes',
+      'file' => 'routes_type.admin.inc',
+      'controller class' => 'RoutesTypeUIController',
+    ),
+  );
+
+  return $return;
+}
+
+function routes_preprocess(&$variables, $hook) {
+  if (isset($variables['elements']['#entity_type'])) {
+    if ($variables['elements']['#entity_type'] == 'routes') {
+      $hook = 'preprocess_' . $variables['elements']['#entity_type'];
+      $modules = module_implements($hook);
+      foreach ($modules as $module) {
+        $function = "{$module}_{$hook}";
+        $function($variables);
+      }
+    }
+  }
+}
+
+
+/**
+ * Implements hook_entity_info_alter().
+ *
+ * We are adding the info about the model types via a hook to avoid a recursion
+ * issue as loading the model types requires the entity info as well.
+ *
+ * @todo This needs to be improved
+ */
+function routes_entity_info_alter(&$entity_info) {
+  foreach (routes_get_types() as $type => $info) {
+    $entity_info['routes']['bundles'][$type] = array(
+      'label' => $info->label,
+      'admin' => array(
+        'path' => 'admin/structure/routes/manage/%routes_type',
+        'real path' => 'admin/structure/routes/manage/' . $type,
+        'bundle argument' => 4,
+        'access arguments' => array('administer routes types'),
+      ),
+    );
+  }
+
+  if (isset($entity_info['routes'])) {
+    $entity_info['routes']['token type'] = 'routes';
+  }
+}
+
+
+/**
+ * Implements hook_permission().
+ */
+function routes_permission() {
+  // We set up permisssions to manage entity types, manage all entities and the
+  // permissions for each individual entity
+  $permissions = array(
+    'administer routes types' => array(
+      'title' => t('Administer routes types'),
+      'description' => t('Create and delete fields for routes types, and set their permissions.'),
+    ),
+    'administer routes' => array(
+      'title' => t('Administer routes'),
+      'description' => t('Edit and delete all routes'),
+    ),
+  );
+
+  //Generate permissions per model
+  foreach (routes_get_types() as $type) {
+    $type_name = check_plain($type->type);
+    $permissions += array(
+      "edit any $type_name routes" => array(
+        'title' => t('%type_name: Edit any routes', array('%type_name' => $type->label)),
+      ),
+      "view any $type_name routes" => array(
+        'title' => t('%type_name: View any routes', array('%type_name' => $type->label)),
+      ),
+    );
+  }
+  return $permissions;
+}
+
+
+/**
+ * Determines whether the given user has access to a model.
+ *
+ * @param $op
+ *   The operation being performed. One of 'view', 'update', 'create', 'delete'
+ *   or just 'edit' (being the same as 'create' or 'update').
+ * @param $model
+ *   Optionally a model or a model type to check access for. If nothing is
+ *   given, access for all models is determined.
+ * @param $account
+ *   The user to check for. Leave it to NULL to check for the global user.
+ * @return boolean
+ *   Whether access is allowed or not.
+ */
+function routes_access($op, $routes = NULL, $account = NULL) {
+  if (user_access('administer routes', $account)) {
+    return TRUE;
+  }
+  if (isset($routes) && $type_name = $routes->type) {
+    $op = ($op == 'view') ? 'view' : 'edit';
+    if (user_access("$op any $type_name routes", $account)) {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+
+/**
+ * Access callback for the entity API.
+ */
+function routes_type_access($op, $type = NULL, $account = NULL) {
+  return user_access('administer routes types', $account);
+}
+
+
+/**
+ * Gets an array of all model types, keyed by the type name.
+ *
+ * @param $type_name
+ *   If set, the type with the given name is returned.
+ * @return RoutesType[]
+ *   Depending whether $type isset, an array of routes types or a single one.
+ */
+function routes_get_types($type_name = NULL) {
+  $types = entity_load_multiple_by_name('routes_type', isset($type_name) ? array($type_name) : FALSE);
+  return isset($type_name) ? reset($types) : $types;
+}
+
+
+/**
+ * Menu argument loader; Load a model type by string.
+ *
+ * @param $type
+ *   The machine-readable name of a model type to load.
+ * @return
+ *   A model type array or FALSE if $type does not exist.
+ */
+function routes_type_load($type) {
+  return routes_get_types($type);
+}
+
+
+/**
+ * Load routes by RID
+ */
+function routes_load($gid, $reset = FALSE) {
+  $routes = routes_load_multiple(array($gid), array(), $reset);
+  return reset($routes);
+}
+
+/**
+ * Load routes by GeoPoint
+ */
+function routes_load_by_geopoint($pid1, $pid2, $reset = FALSE) {
+  $query = db_select('routes', 'r')
+    ->fields('r', array('rid'))
+    ->condition('r.pid1', $pid1)
+    ->condition('r.pid2', $pid2);
+  $result = $query->execute()->fetchField();
+
+  if ($result) {
+    return routes_load($result);
+  }
+  else {
+    return FALSE;
+  }
+}
+
+/**
+ * Load multiple routes
+ */
+function routes_load_multiple($rids = array(), $conditions = array(), $reset = FALSE) {
+  $entitys = entity_load('routes', $rids, $conditions, $reset);
+  //&todo attach geopoint field to routes point
+  return $entitys;
+}
+
+
+/**
+ * Deletes routes
+ */
+function routes_delete(Routes $routes) {
+  $routes->delete();
+}
+
+
+/**
+ * Delete multiple routes.
+ */
+function routes_delete_multiple(array $rids) {
+  entity_get_controller('routes')->delete($rids);
+}
+
+
+/**
+ * Create a routes object.
+ */
+function routes_create($values = array()) {
+  if (empty($values)) {
+    return FALSE;
+  }
+
+  $routes = entity_get_controller('routes')->create($values);
+
+  return $routes;
+}
+
+
+/**
+ * Saves routes to the database.
+ */
+function routes_save(Routes $routes) {
+  return $routes->save();
+}
+
+
+/**
+ * Saves routes type to the db.
+ */
+function routes_type_save(RoutesType $type) {
+  $type->save();
+}
+
+
+/**
+ * Deletes routes type from the db.
+ */
+function routes_type_delete(RoutesType $type) {
+  $type->delete();
+}
+
+
+/**
+ * URI callback for routes
+ */
+function routes_uri(Routes $routes) {
+
+  return array(
+    'path' => 'routes/' . $routes->rid,
+  );
+
+}
+
+
+/**
+ * Menu title callback for routes
+ */
+function routes_page_title(Routes $routes) {
+  $prefix = '';
+
+  if (arg(2)) {
+    switch (arg(2)) {
+      case 'drivers' :
+        $prefix = t('Car shares').' ';
+        break;
+      case 'passengers' :
+        $prefix = t('Trip passengers').' ';
+        break;
+    }
+    if (arg(3)) {
+      switch (arg(3)) {
+        case 'man' :
+          $prefix = t('Mail trip passenger').' ';
+          break;
+        case 'woman' :
+          $prefix = t('Female trip passanger').' ';
+          break;
+      }
+    }
+  }
+
+  $title = $prefix.geopoint_name($routes->pid1, 'short') . ' → ' . geopoint_name($routes->pid2, 'short');
+  return $title;
+}
+
+
+/**
+ * Sets up content to show an individual routes
+ */
+function routes_page_view($routes, $view_mode = 'full') {
+  $controller = entity_get_controller('routes');
+  $content = $controller->view(array($routes->rid => $routes));
+
+
+  return $content;
+}
+
+/**
+ * Get route normalise name
+ */
+
+function routes_get_normalise_name($route, $separator = ' &rarr; ') {
+  if (!is_object($route)) {
+    $route = routes_load($route);
+  }
+  $route_pid1 = geopoint_load($route->pid1);
+  $route_pid2 = geopoint_load($route->pid2);
+
+  switch ($route_pid1->type) {
+    case 'premise' :
+      $items = array();
+//			$items[] = geopoint_load($route_pid1->locality)->short;
+      $items[] = geopoint_load($route_pid1->route)->short;
+      $items[] = $route_pid1->short;
+      $first = implode(', ', $items);
+      break;
+    default :
+      $first = $route_pid1->short;
+  }
+
+  switch ($route_pid2->type) {
+    case 'premise' :
+      $items = array();
+      $items[] = geopoint_load($route_pid2->locality)->short;
+      $items[] = geopoint_load($route_pid2->route)->short;
+      $items[] = $route_pid2->short;
+      $last = implode(', ', $items);
+      break;
+
+    default :
+      $last = $route_pid2->short;
+  }
+
+  return $first . $separator . $last;
+}
+
+/**
+ * Implements hook_field_info().
+ *
+ * Provides the description of the field.
+ */
+function route_distancematrix($p1, $p2) {
+  //http://maps.googleapis.com/maps/api/distancematrix/json?origins=$p1&destinations=$p2&sensor=false
+
+  $count = variable_get('DAWAY_GMAP_COUNT', 0);
+  $count++;
+  variable_set('DAWAY_GMAP_COUNT', $count);
+
+  $results = FALSE; //file_get_contents('http://maps.googleapis.com/maps/api/distancematrix/json?origins='.urlencode($p1).'&destinations='.urlencode($p2).'&sensor=false');
+//	watchdog('Routes', $results);
+  $results = json_decode($results);
+  if ($results->status == 'OK') {
+    $data = array(
+      'distance' => $results->rows[0]->elements[0]->distance->value,
+      'duration' => $results->rows[0]->elements[0]->duration->value,
+    );
+
+    return $data;
+  }
+  else {
+    $data = array(
+      'distance' => 0,
+      'duration' => 0,
+    );
+    return $data;
+  }
+}
+
+
+/**
+ * Implements hook_views_api().
+ */
+function routes_views_api() {
+  return array(
+    'api' => 3,
+    'path' => drupal_get_path('module', 'routes') . '/views',
+  );
+}
+
+
+/**
+ * Implement hook_theme().
+ */
+function routes_theme() {
+  return array(
+    'routes_add_list' => array(
+      'variables' => array('content' => array()),
+      'file' => 'routes.admin.inc',
+    ),
+    'routes' => array(
+      'render element' => 'elements',
+      'template' => 'routes',
+    ),
+  );
+}
+
+
+/**
+ * Implements hook_menu_local_tasks_alter().
+ */
+function routes_menu_local_tasks_alter(&$data, $router_item, $root_path) {
+  // Add action link 'admin/structure/models/add' on 'admin/structure/models'.
+  if ($root_path == 'admin/content/routes') {
+    $item = menu_get_item('admin/content/routes/add');
+    if ($item['access']) {
+      $data['actions']['output'][] = array(
+        '#theme' => 'menu_local_action',
+        '#link' => $item,
+      );
+    }
+  }
+}
+
+
+/**
+ * The class used for routes entities
+ */
+class Routes extends Entity {
+
+  public function __construct($values = array()) {
+    parent::__construct($values, 'routes');
+  }
+
+  protected function defaultLabel() {
+    return $this->name;
+  }
+
+  protected function defaultUri() {
+    return array('path' => 'routes/' . $this->rid);
+  }
+
+  public function save() {
+
+    $geopoint_from = new GeoPoint();
+    $geopoint_from->name = $this->pid1;
+    $geopoint_from = geopoint_save($geopoint_from);
+
+    $geopoint_to = new GeoPoint();
+    $geopoint_to->name = $this->pid2;
+    $geopoint_to = geopoint_save($geopoint_to);
+
+    if ($routes = routes_load_by_geopoint($geopoint_from->pid, $geopoint_to->pid)) {
+      return $routes;
+    }
+    else {
+      $data = geopoint_distancematrix($this->pid1, $this->pid2);
+
+      if (!empty($data)) {
+        $routes = new stdClass();
+        $routes->name = $geopoint_from->short . ' - ' . $geopoint_to->short;
+        $routes->pid1 = $geopoint_from->pid;
+        $routes->pid2 = $geopoint_to->pid;
+        $routes->distance = $data['distance'];
+        $routes->duration = $data['duration'];
+        $routes->type = 'default';
+        $entity = entity_save('routes', $routes);
+        return $routes;
+      }
+      else {
+        return FALSE;
+      }
+    }
+
+  }
+
+}
+
+
+/**
+ * The class used for routes type entities
+ */
+class RoutesType extends Entity {
+  public $type;
+  public $label;
+
+  public function __construct($values = array()) {
+    parent::__construct($values, 'routes_type');
+  }
+}
+
+
+/**
+ * The Controller for Routers entities
+ */
+class RoutesController extends EntityAPIController {
+  public function __construct($entityType) {
+    parent::__construct($entityType);
+  }
+
+  public function create(array $values = array()) {
+    $values += array(
+      'rid' => '',
+      'name' => '',
+      'is_new' => TRUE,
+      'pid1' => '',
+      'pid2' => '',
+      'distance' => '',
+      'duration' => '',
+    );
+
+    $routes = parent::create($values);
+    return $routes;
+  }
+
+  public function buildContent($entity, $view_mode = 'full', $langcode = NULL, $content = array()) {
+    $content = parent::buildContent($entity, $view_mode, $langcode, $content);
+    $content['routes'] = $entity;
+    return $content;
+  }
+
+}
+
+
+/**
+ * The Controller for routes entities
+ */
+class RoutesTypeController extends EntityAPIControllerExportable {
+  public function __construct($entityType) {
+    parent::__construct($entityType);
+  }
+
+  public function create(array $values = array()) {
+    // Add values that are specific to our Model
+    $values += array(
+      'id' => '',
+      'is_new' => TRUE,
+    );
+    $routes_type = parent::create($values);
+    return $routes_type;
+  }
+
+}
+
